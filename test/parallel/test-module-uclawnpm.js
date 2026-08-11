@@ -309,6 +309,29 @@ assert.deepStrictEqual(JSON.parse(result.stdout), {
   lateStandard: 'late-standard',
 });
 
+const mediaApp = path.join(tmpdir.path, 'media-app');
+const moduleCache = path.join(tmpdir.path, 'module-cache');
+fs.mkdirSync(mediaApp, { recursive: true });
+writeArchive(path.join(moduleCache, 'node_modules', 'cross-root.uclawnpm'), {
+  'package.json': JSON.stringify({ name: 'cross-root', main: 'index.js' }),
+  'index.js': "module.exports = 'cross-root-cache';",
+});
+const crossRootMain = path.join(mediaApp, 'main.mjs');
+fs.writeFileSync(crossRootMain, `
+  import value from 'cross-root';
+  process.stdout.write(value);
+`);
+const crossRootResult = spawnSync(process.execPath, [crossRootMain], {
+  encoding: 'utf8',
+  env: {
+    ...process.env,
+    UCLAW_OPENCLAW_MEDIA_ROOT: mediaApp,
+    UCLAW_OPENCLAW_MODULE_CACHE_ROOT: moduleCache,
+  },
+});
+assert.strictEqual(crossRootResult.status, 0, crossRootResult.stderr);
+assert.strictEqual(crossRootResult.stdout, 'cross-root-cache');
+
 const descriptorCache = path.join(app, 'descriptor-cache.cjs');
 fs.writeFileSync(descriptorCache, `
 const fs = require('fs');

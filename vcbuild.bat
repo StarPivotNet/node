@@ -431,7 +431,7 @@ where /R . /T *.gyp* >> .gyp_configure_stamp
 if defined nobuild goto :after-build
 
 @rem Build the sln with msbuild.
-set "msbcpu=/m:2"
+set "msbcpu=/m"
 if "%NUMBER_OF_PROCESSORS%"=="1" set "msbcpu=/m:1"
 set "msbplatform=x64"
 if "%target_arch%"=="arm64" set "msbplatform=ARM64"
