@@ -98,11 +98,95 @@ constexpr bool IsWindowsDeviceRoot(const char c) noexcept {
   return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z');
 }
 
+void NormalizeExtendedWindowsExecPath(std::string* path) {
+  if (path == nullptr || !path->starts_with("\\\\?\\") || path->size() < 7 ||
+      !IsWindowsDeviceRoot((*path)[4]) || (*path)[5] != ':' ||
+      (*path)[6] != '\\') {
+    return;
+  }
+
+  const std::string candidate = path->substr(4);
+  const ssize_t utf16_length = uv_wtf8_length_as_utf16(candidate.c_str());
+  // uv_wtf8_length_as_utf16() includes the terminating NUL. Windows' MAX_PATH
+  // limit is likewise defined in UTF-16 characters including that terminator.
+  if (utf16_length < 0 || utf16_length > MAX_PATH) return;
+
+  auto is_reserved_name = [](std::string_view component) {
+    const size_t dot = component.find('.');
+    const std::string_view base = component.substr(0, dot);
+    auto equals_ascii_case_insensitive = [](std::string_view value,
+                                            std::string_view expected) {
+      if (value.size() != expected.size()) return false;
+      for (size_t i = 0; i < value.size(); i++) {
+        const char lower = value[i] >= 'A' && value[i] <= 'Z'
+            ? value[i] + ('a' - 'A')
+            : value[i];
+        if (lower != expected[i]) return false;
+      }
+      return true;
+    };
+    if (equals_ascii_case_insensitive(base, "con") ||
+        equals_ascii_case_insensitive(base, "conin$") ||
+        equals_ascii_case_insensitive(base, "conout$") ||
+        equals_ascii_case_insensitive(base, "prn") ||
+        equals_ascii_case_insensitive(base, "aux") ||
+        equals_ascii_case_insensitive(base, "nul") ||
+        equals_ascii_case_insensitive(base, "clock$")) {
+      return true;
+    }
+    const bool com_or_lpt =
+        ((base[0] == 'C' || base[0] == 'c') &&
+         (base[1] == 'O' || base[1] == 'o') &&
+         (base[2] == 'M' || base[2] == 'm')) ||
+        ((base[0] == 'L' || base[0] == 'l') &&
+         (base[1] == 'P' || base[1] == 'p') &&
+         (base[2] == 'T' || base[2] == 't'));
+    const bool ascii_device_number =
+        base.size() == 4 && base[3] >= '1' && base[3] <= '9';
+    const bool superscript_device_number =
+        base.size() == 5 && base[3] == static_cast<char>(0xC2) &&
+        (base[4] == static_cast<char>(0xB2) ||
+         base[4] == static_cast<char>(0xB3) ||
+         base[4] == static_cast<char>(0xB9));
+    if (com_or_lpt && (ascii_device_number || superscript_device_number)) {
+      return true;
+    }
+    return false;
+  };
+
+  size_t component_start = 3;
+  while (component_start < candidate.size()) {
+    const size_t separator = candidate.find('\\', component_start);
+    const size_t component_end = separator == std::string::npos
+        ? candidate.size()
+        : separator;
+    const std::string_view component(candidate.data() + component_start,
+                                     component_end - component_start);
+    if (component.empty() || component == "." || component == ".." ||
+        component.back() == '.' || component.back() == ' ' ||
+        is_reserved_name(component)) {
+      return;
+    }
+    for (const char c : component) {
+      if (c == '/' || c == ':' || c == '*' || c == '?' || c == '"' ||
+          c == '<' || c == '>' || c == '|' ||
+          static_cast<unsigned char>(c) < 0x20) {
+        return;
+      }
+    }
+    if (separator == std::string::npos) break;
+    component_start = separator + 1;
+  }
+
+  *path = candidate;
+}
+
 std::string PathResolve(Environment* env,
                         const std::vector<std::string_view>& paths) {
   std::string resolvedDevice = "";
   std::string resolvedTail = "";
   bool resolvedAbsolute = false;
+  bool resolvedExtendedRootHasSeparator = false;
   const size_t numArgs = paths.size();
   auto cwd = env->GetCwd(env->exec_path());
 
@@ -176,7 +260,59 @@ std::string PathResolve(Environment* env,
               j++;
             }
             if (j == len || j != last) {
-              if (firstPart != "." && firstPart != "?") {
+              const std::string secondPart = path.substr(last, j - last);
+              if (firstPart == "?" &&
+                  secondPart.size() == 2 &&
+                  IsWindowsDeviceRoot(secondPart[0]) &&
+                  secondPart[1] == ':') {
+                // Extended drive paths (e.g. \\?\C:\foo) include the
+                // drive in the device root. Keeping it in resolvedDevice
+                // prevents NormalizeString from dropping the root slash.
+                device = "\\\\?\\" + secondPart;
+                rootEnd = j;
+                if (j < len && IsPathSeparator(path[j])) {
+                  rootEnd = ++j;
+                }
+              } else if (firstPart == "?" &&
+                         ToLower(secondPart) == "unc") {
+                // Extended UNC paths (e.g. \\?\UNC\server\share\foo)
+                // have two additional root components.
+                size_t serverStart = j;
+                while (serverStart < len &&
+                       IsPathSeparator(path[serverStart])) {
+                  serverStart++;
+                }
+                size_t serverEnd = serverStart;
+                while (serverEnd < len &&
+                       !IsPathSeparator(path[serverEnd])) {
+                  serverEnd++;
+                }
+                size_t shareStart = serverEnd;
+                while (shareStart < len &&
+                       IsPathSeparator(path[shareStart])) {
+                  shareStart++;
+                }
+                size_t shareEnd = shareStart;
+                while (shareEnd < len &&
+                       !IsPathSeparator(path[shareEnd])) {
+                  shareEnd++;
+                }
+                if (serverEnd != serverStart && shareEnd != shareStart) {
+                  device = "\\\\?\\" + secondPart + "\\" +
+                           path.substr(serverStart, serverEnd - serverStart) +
+                           "\\" +
+                           path.substr(shareStart, shareEnd - shareStart);
+                  rootEnd = shareEnd;
+                  if (shareEnd < len && IsPathSeparator(path[shareEnd])) {
+                    rootEnd = shareEnd + 1;
+                  }
+                } else {
+                  // Preserve the generic device-path behavior for incomplete
+                  // extended UNC paths such as \\?\UNC\server.
+                  device = "\\\\?";
+                  rootEnd = 4;
+                }
+              } else if (firstPart != "." && firstPart != "?") {
                 // We matched a UNC root
                 device =
                     "\\\\" + firstPart + "\\" + path.substr(last, j - last);
@@ -213,6 +349,11 @@ std::string PathResolve(Environment* env,
       }
     }
 
+    resolvedExtendedRootHasSeparator =
+        resolvedExtendedRootHasSeparator ||
+        (isAbsolute && rootEnd > 0 &&
+         IsPathSeparator(path[rootEnd - 1]));
+
     if (resolvedAbsolute) {
       if (!resolvedDevice.empty()) {
         break;
@@ -234,6 +375,11 @@ std::string PathResolve(Environment* env,
   resolvedTail = NormalizeString(resolvedTail, !resolvedAbsolute, "\\");
 
   if (resolvedAbsolute) {
+    if (resolvedTail.empty() &&
+        resolvedDevice.starts_with("\\\\?\\") &&
+        !resolvedExtendedRootHasSeparator) {
+      return resolvedDevice;
+    }
     return resolvedDevice + "\\" + resolvedTail;
   }
 

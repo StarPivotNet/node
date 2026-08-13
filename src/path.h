@@ -24,6 +24,7 @@ bool IsAbsoluteFilePath(std::string_view path);
 #ifdef _WIN32
 constexpr bool IsWindowsDeviceRoot(const char c) noexcept;
 constexpr bool IsWindowsDriveLetter(const std::string_view path) noexcept;
+void NormalizeExtendedWindowsExecPath(std::string* path);
 #endif  // _WIN32
 
 void ToNamespacedPath(Environment* env, BufferValue* path);

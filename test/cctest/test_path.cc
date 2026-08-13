@@ -39,10 +39,55 @@ TEST_F(PathTest, PathResolve) {
   EXPECT_EQ(
       PathResolve(*env, {"C:\\foo\\tmp.3\\", "..\\tmp.3\\cycles\\root.js"}),
       "C:\\foo\\tmp.3\\cycles\\root.js");
+  EXPECT_EQ(PathResolve(*env, {"\\\\?\\C:\\"}), "\\\\?\\C:\\");
+  EXPECT_EQ(PathResolve(*env, {"\\\\?\\C:"}), "\\\\?\\C:");
+  EXPECT_EQ(PathResolve(*env, {"\\\\?\\C:", "\\"}), "\\\\?\\C:\\");
+  EXPECT_EQ(PathResolve(*env, {"\\\\?\\C:\\dir\\file.exe"}),
+            "\\\\?\\C:\\dir\\file.exe");
+  EXPECT_EQ(PathResolve(*env, {"\\\\?\\C:\\", "..\\file.exe"}),
+            "\\\\?\\C:\\file.exe");
+  EXPECT_EQ(PathResolve(*env,
+                        {"\\\\?\\C:\\", "one", "two", "file.exe"}),
+            "\\\\?\\C:\\one\\two\\file.exe");
+  EXPECT_EQ(
+      PathResolve(*env,
+                  {"\\\\?\\C:\\", "one\\two", "..\\..\\..\\file.exe"}),
+      "\\\\?\\C:\\file.exe");
+  EXPECT_EQ(PathResolve(*env, {"\\\\?\\UNC\\server\\share\\"}),
+            "\\\\?\\UNC\\server\\share\\");
+  EXPECT_EQ(PathResolve(*env, {"\\\\?\\UNC\\server\\share"}),
+            "\\\\?\\UNC\\server\\share");
+  EXPECT_EQ(PathResolve(*env, {"\\\\?\\UNC\\server\\share", "\\"}),
+            "\\\\?\\UNC\\server\\share\\");
+  EXPECT_EQ(PathResolve(*env, {"\\\\?\\unc\\Server\\Share\\dir\\file.exe"}),
+            "\\\\?\\unc\\Server\\Share\\dir\\file.exe");
+  EXPECT_EQ(PathResolve(*env, {"\\\\?\\UNC\\server\\share\\dir\\file.exe"}),
+            "\\\\?\\UNC\\server\\share\\dir\\file.exe");
+  EXPECT_EQ(
+      PathResolve(*env,
+                  {"\\\\?\\UNC\\server\\share\\", "..\\file.exe"}),
+      "\\\\?\\UNC\\server\\share\\file.exe");
+  EXPECT_EQ(PathResolve(*env,
+                        {"\\\\?\\UNC\\server\\share\\",
+                         "one",
+                         "two",
+                         "file.exe"}),
+            "\\\\?\\UNC\\server\\share\\one\\two\\file.exe");
+  EXPECT_EQ(PathResolve(
+                *env,
+                {"\\\\?\\UNC\\server\\share\\",
+                 "one\\two",
+                 "..\\..\\..\\file.exe"}),
+            "\\\\?\\UNC\\server\\share\\file.exe");
+  EXPECT_EQ(PathResolve(*env, {"\\\\?\\UNC"}), "\\\\?\\UNC");
+  EXPECT_EQ(PathResolve(*env, {"\\\\?\\UNC\\server\\"}),
+            "\\\\?\\UNC\\server");
   EXPECT_EQ(PathResolve(*env, {"\\\\.\\PHYSICALDRIVE0"}),
             "\\\\.\\PHYSICALDRIVE0");
   EXPECT_EQ(PathResolve(*env, {"\\\\?\\PHYSICALDRIVE0"}),
             "\\\\?\\PHYSICALDRIVE0");
+  EXPECT_EQ(PathResolve(*env, {"\\\\?\\PHYSICALDRIVE0\\tail"}),
+            "\\\\?\\PHYSICALDRIVE0\\tail");
 #else
   EXPECT_EQ(PathResolve(*env, {"/var/lib", "../", "file/"}), "/var/file");
   EXPECT_EQ(PathResolve(*env, {"/var/lib", "/../", "file/"}), "/file");
@@ -51,6 +96,54 @@ TEST_F(PathTest, PathResolve) {
   EXPECT_EQ(PathResolve(*env, {"/some/dir", ".", "/absolute/"}), "/absolute");
   EXPECT_EQ(PathResolve(*env, {"/foo/tmp.3/", "../tmp.3/cycles/root.js"}),
             "/foo/tmp.3/cycles/root.js");
+#endif
+}
+
+TEST_F(PathTest, NormalizeExtendedWindowsExecPath) {
+#ifdef _WIN32
+  std::string path = "\\\\?\\C:\\node.exe";
+  node::NormalizeExtendedWindowsExecPath(&path);
+  EXPECT_EQ(path, "C:\\node.exe");
+
+  const std::vector<std::string> preserved = {
+    "\\\\?\\UNC\\server\\share\\node.exe",
+    "\\\\?\\Volume{1234}\\node.exe",
+    "\\\\?\\GLOBALROOT\\Device\\HarddiskVolume1\\node.exe",
+    "\\\\?\\C:\\node.exe.",
+    "\\\\?\\C:\\node.exe ",
+    "\\\\?\\C:\\CON\\node.exe",
+    "\\\\?\\C:\\COM\xC2\xB9\\node.exe",
+    "\\\\?\\C:\\LPT\xC2\xB2\\node.exe",
+    "\\\\?\\C:\\CONIN$\\node.exe",
+    "\\\\?\\C:\\CONOUT$\\node.exe",
+    "\\\\?\\C:\\node.exe:stream",
+    "\\\\?\\C:\\node/child.exe",
+    "\\\\?\\C:\\node\\.\\child.exe",
+    "\\\\?\\C:\\node\\..\\child.exe",
+  };
+  for (size_t i = 0; i < preserved.size(); i++) {
+    std::string value = preserved[i];
+    node::NormalizeExtendedWindowsExecPath(&value);
+    EXPECT_EQ(value, preserved[i]);
+  }
+
+  std::string long_path = "\\\\?\\C:\\" + std::string(MAX_PATH, 'x') +
+                          ".exe";
+  const std::string original = long_path;
+  node::NormalizeExtendedWindowsExecPath(&long_path);
+  EXPECT_EQ(long_path, original);
+
+  std::string max_path = "\\\\?\\C:\\" +
+                         std::string(MAX_PATH - 3 - 4 - 1, 'x') + ".exe";
+  const std::string max_path_original = max_path;
+  node::NormalizeExtendedWindowsExecPath(&max_path);
+  EXPECT_EQ(max_path, max_path_original.substr(4));
+
+  std::string over_max_path = "\\\\?\\C:\\" +
+                              std::string(MAX_PATH - 3 - 4, 'x') + ".exe";
+  const std::string over_max_path_original = over_max_path;
+  node::NormalizeExtendedWindowsExecPath(&over_max_path);
+  EXPECT_EQ(over_max_path, over_max_path_original);
 #endif
 }
 

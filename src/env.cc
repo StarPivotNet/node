@@ -12,6 +12,7 @@
 #include "node_internals.h"
 #include "node_options-inl.h"
 #include "node_process-inl.h"
+#include "path.h"
 #include "node_shadow_realm.h"
 #include "node_snapshotable.h"
 #include "node_v8_platform-inl.h"
@@ -760,6 +761,10 @@ std::string Environment::GetExecPath(const std::vector<std::string>& argv) {
   } else if (!argv.empty()) {
     exec_path = argv[0];
   }
+
+#ifdef _WIN32
+  NormalizeExtendedWindowsExecPath(&exec_path);
+#endif
 
   // On OpenBSD process.execPath will be relative unless we
   // get the full path before process.execPath is used.
